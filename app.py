@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, abort, jsonify
+from flask import Flask, request, abort, jsonify, render_template_string
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -68,10 +68,75 @@ def missed():
     return "missed alert sent"
 
 
-# 看目前的服藥紀錄（之後藥局後台會用這份資料）
+# 看目前的服藥紀錄
 @app.route("/log")
 def log():
     return jsonify(records)
+
+
+# 示範病患資料（過去 30 天）。「王阿公」會加上即時紀錄，Demo 時會動
+DEMO_PATIENTS = [
+    {"name": "王阿公", "taken": 16, "missed": 2, "live": True},
+    {"name": "陳阿嬤", "taken": 29, "missed": 1},
+    {"name": "李先生", "taken": 18, "missed": 12},
+    {"name": "林奶奶", "taken": 22, "missed": 8},
+]
+
+DASHBOARD_HTML = """
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>藥局後台</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body{font-family:sans-serif;max-width:800px;margin:24px auto;padding:0 16px}
+  table{width:100%;border-collapse:collapse;margin-bottom:24px}
+  th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}
+  .high{color:#fff;background:#d33;padding:2px 10px;border-radius:10px}
+  .ok{color:#fff;background:#2a9d57;padding:2px 10px;border-radius:10px}
+</style>
+</head>
+<body>
+<h1>💊 藥局後台：病患服藥總覽</h1>
+<table>
+  <tr><th>病患</th><th>已服</th><th>漏服</th><th>遵從率</th><th>風險</th></tr>
+  {% for p in rows %}
+  <tr>
+    <td>{{ p.name }}</td><td>{{ p.taken }}</td><td>{{ p.missed }}</td><td>{{ p.rate }}%</td>
+    <td>{% if p.rate < 80 %}<span class="high">高風險</span>{% else %}<span class="ok">穩定</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+<canvas id="c" height="120"></canvas>
+<script>
+  const rows = {{ rows|tojson }};
+  new Chart(document.getElementById('c'), {
+    type: 'bar',
+    data: {
+      labels: rows.map(r => r.name),
+      datasets: [{ label: '遵從率 (%)', data: rows.map(r => r.rate) }]
+    },
+    options: { scales: { y: { min: 0, max: 100 } } }
+  });
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/dashboard")
+def dashboard():
+    rows = []
+    for p in DEMO_PATIENTS:
+        taken, missed = p["taken"], p["missed"]
+        if p.get("live"):  # 加上 LINE 上即時按的紀錄
+            taken += sum(1 for r in records if r["status"] == "taken")
+            missed += sum(1 for r in records if r["status"] == "missed")
+        rate = round(taken / (taken + missed) * 100)
+        rows.append({"name": p["name"], "taken": taken, "missed": missed, "rate": rate})
+    return render_template_string(DASHBOARD_HTML, rows=rows)
 
 
 # 長輩按下按鈕
@@ -85,10 +150,14 @@ def handle_postback(event):
         reply = "好的，10 分鐘後再提醒您。"
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply)],
+            )
         )
 
 
+# 一般文字訊息：回聲
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     with ApiClient(configuration) as api_client:
